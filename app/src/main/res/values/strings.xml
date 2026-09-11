@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Auto Tap by Image</string>
+    <string name="accessibility_service_desc">Layanan ini digunakan oleh Auto Tap by Image untuk mendeteksi target visual di layar dan mensimulasikan ketukan (tap) otomatis di lokasi yang cocok tanpa root.</string>
+</resources>

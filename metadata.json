@@ -1,0 +1,8 @@
+{
+  "name": "Remix Auto Tap by Image",
+  "description": "An image-based auto-clicker using OpenCV to detect visual targets and AccessibilityService to perform automated taps without root access.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

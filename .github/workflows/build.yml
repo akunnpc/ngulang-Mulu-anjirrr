@@ -1,0 +1,271 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Debug - Show Initial Directory
+        run: |
+          echo "📁 Initial directory contents:"
+          ls -la
+          echo ""
+          echo "📝 Looking for ZIP files:"
+          find . -maxdepth 1 -name "*.zip" -type f
+
+      - name: Extract Project
+        run: |
+          echo "🔍 Checking for ZIP files..."
+          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" -type f | head -n 1)
+          
+          if [ -n "$ZIP_FILE" ]; then
+            echo "✓ Found ZIP file: $ZIP_FILE"
+            mkdir -p project
+            unzip -q "$ZIP_FILE" -d project
+            echo "✓ ZIP extracted successfully"
+            echo ""
+            echo "📁 Contents of project directory after extraction:"
+            ls -la project/
+          else
+            echo "⚠ No ZIP file found in repository root"
+            echo "Checking if project structure already exists..."
+            if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+              echo "✓ Project structure found in root"
+            else
+              echo "⚠ No project structure detected"
+            fi
+          fi
+
+      - name: Move Project (if ZIP exists)
+        run: |
+          echo "🔄 Checking if project directory exists..."
+          if [ -d "project" ]; then
+            echo "✓ project directory found"
+            echo ""
+            echo "📁 Checking project structure..."
+            
+            # Cek apakah ada build.gradle langsung di project/
+            if [ -f "project/build.gradle" ] || [ -f "project/build.gradle.kts" ]; then
+              echo "✓ Structure: project/build.gradle (direct)"
+              echo "Copying files to workspace root..."
+              cp -r project/* .
+              cp -r project/.[^.]* . 2>/dev/null || true
+              echo "✓ Direct structure files copied"
+            else
+              # Cek subfolder
+              echo "🔍 Looking for subdirectories with build.gradle..."
+              PROJECT_DIR=$(find project -mindepth 1 -maxdepth 1 -type d | head -n 1)
+              
+              if [ -n "$PROJECT_DIR" ]; then
+                echo "✓ Found subdirectory: $PROJECT_DIR"
+                echo "Contents of $PROJECT_DIR:"
+                ls -la "$PROJECT_DIR"/
+                
+                if [ -f "$PROJECT_DIR/build.gradle" ] || [ -f "$PROJECT_DIR/build.gradle.kts" ]; then
+                  echo "✓ Structure: project/subfolder/build.gradle"
+                  cp -r "$PROJECT_DIR"/* .
+                  cp -r "$PROJECT_DIR"/.[^.]* . 2>/dev/null || true
+                  echo "✓ Subfolder structure files copied"
+                else
+                  echo "⚠ No build.gradle found in subdirectory"
+                  echo "Showing all .gradle files in project:"
+                  find project -name "build.gradle*" -type f
+                fi
+              else
+                echo "❌ No subdirectories found in project folder"
+                echo "Contents of project folder:"
+                find project -type f | head -20
+              fi
+            fi
+            
+            echo ""
+            echo "Removing temporary project directory..."
+            rm -rf project
+            echo "✓ Project moved to workspace"
+          else
+            echo "⚠ project directory not found, skipping move step"
+          fi
+
+      - name: Verify Project Structure
+        run: |
+          echo "📁 Final workspace directory structure:"
+          ls -la
+          echo ""
+          echo "🔍 Checking for build.gradle files..."
+          BUILD_FILE=""
+          
+          if [ -f "build.gradle" ]; then
+            BUILD_FILE="build.gradle"
+            echo "✓ Found: build.gradle"
+          elif [ -f "build.gradle.kts" ]; then
+            BUILD_FILE="build.gradle.kts"
+            echo "✓ Found: build.gradle.kts"
+          else
+            echo "❌ Error: Neither build.gradle nor build.gradle.kts found!"
+            echo ""
+            echo "📝 Searching for build.gradle files anywhere in repo:"
+            find . -name "build.gradle*" -type f 2>/dev/null | head -10
+            echo ""
+            echo "📋 Directory tree (first 50 lines):"
+            find . -type f -not -path './.git/*' | head -50
+            exit 1
+          fi
+          
+          echo ""
+          echo "✓ Project structure verified"
+          echo "Build file: $BUILD_FILE"
+
+      - name: Check Gradle Wrapper
+        run: |
+          echo "🔍 Checking for gradlew..."
+          if [ -f "gradlew" ]; then
+            echo "✓ gradlew found"
+            echo "Checking permissions..."
+            ls -la gradlew
+          else
+            echo "⚠ gradlew not found, will use system gradle"
+          fi
+
+      - name: Create local.properties
+        run: |
+          echo "📝 Creating local.properties..."
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "✓ local.properties created:"
+          cat local.properties
+
+      - name: Generate Secure Keystore
+        run: |
+          echo "🔑 Generating secure keystore..."
+          
+          # Generate random passwords dan alias
+          STORE_PASSWORD=$(openssl rand -base64 32)
+          KEY_PASSWORD=$(openssl rand -base64 32)
+          KEY_ALIAS="key_$(openssl rand -hex 8)"
+          
+          echo "Creating key.properties with generated credentials..."
+          cat > key.properties <<EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=release.keystore
+          EOF
+          
+          echo "✓ key.properties created"
+          
+          echo ""
+          echo "🔑 Generating keystore with keytool..."
+          keytool -genkeypair \
+            -keystore release.keystore \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=GitHub Actions,O=Build,OU=Android,C=ID" \
+            -noprompt
+          
+          echo "✓ Keystore generated successfully"
+          ls -lh release.keystore
+          
+          # Show key.properties (passwords are already hashed in keystore)
+          echo ""
+          echo "✓ Key properties configured"
+
+      - name: Create Debug Keystore
+        run: |
+          echo "🔑 Creating debug keystore..."
+          keytool -genkeypair \
+            -keystore debug.keystore \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -noprompt
+          
+          echo "✓ Debug keystore created"
+          ls -lh debug.keystore
+
+      - name: Grant Permission to Gradle
+        run: |
+          echo "🔐 Setting up gradle permissions..."
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            echo "✓ gradlew permission granted"
+            ./gradlew --version || echo "⚠ Failed to check gradlew version"
+          else
+            echo "⚠ gradlew not found, using system gradle"
+            gradle --version || echo "⚠ gradle not available"
+          fi
+
+      - name: Build Debug APK
+        run: |
+          echo "🔨 Building Debug APK..."
+          if [ -f "gradlew" ]; then
+            echo "Using gradlew..."
+            ./gradlew assembleDebug --stacktrace --info
+            BUILD_STATUS=$?
+          else
+            echo "Using system gradle..."
+            gradle assembleDebug --stacktrace --info
+            BUILD_STATUS=$?
+          fi
+          
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "❌ Build failed with exit code $BUILD_STATUS"
+            exit $BUILD_STATUS
+          fi
+          echo "✓ Build completed successfully"
+
+      - name: List Build Outputs
+        run: |
+          echo "📦 Searching for APK files..."
+          APK_COUNT=$(find . -name "*.apk" -type f 2>/dev/null | wc -l)
+          echo "Found $APK_COUNT APK file(s):"
+          find . -name "*.apk" -type f 2>/dev/null
+          
+          if [ $APK_COUNT -eq 0 ]; then
+            echo "⚠ No APK files found"
+            echo "Checking build directory:"
+            if [ -d "build" ]; then
+              find build -type f 2>/dev/null | head -20
+            else
+              echo "⚠ build directory not found"
+            fi
+          fi
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Debug-APK
+          path: "**/build/outputs/apk/*/*.apk"
+          if-no-files-found: warn
+
+      - name: Upload Build Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Logs
+          path: |
+            build/reports/
+            build/outputs/logs/
+          if-no-files-found: ignore
