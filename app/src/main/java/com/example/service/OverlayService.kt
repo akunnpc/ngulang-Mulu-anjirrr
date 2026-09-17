@@ -3,21 +3,26 @@ package com.example.service
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.text.InputType
+import android.util.DisplayMetrics
 import android.util.Log
 import android.util.TypedValue
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -43,6 +48,7 @@ import com.example.service.ScreenCaptureService.Companion.EXTRA_PROFILE_ID
 import com.example.ui.overlay.HighlightView
 import com.example.ui.overlay.TargetPinView
 import com.example.util.AppLogger
+import com.example.util.CalibrationPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -67,6 +73,8 @@ class OverlayService : Service() {
     // Floating Target Pins
     private val activePins = mutableListOf<TargetPinView>()
     private var activeConfigDialogView: View? = null
+    private var activeCalibrationDialogView: View? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     // programmatically created subviews
     private var collapsedLayout: LinearLayout? = null
@@ -104,8 +112,52 @@ class OverlayService : Service() {
         highlightView = HighlightView(this)
         windowManager?.addView(highlightView, highlightParams)
 
+        // Register display listener for screen rotation changes
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                updateHighlightViewLayout()
+            }
+        }
+        dm?.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+
         createFloatingWidget()
         observeServiceState()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateHighlightViewLayout()
+    }
+
+    private fun updateHighlightViewLayout() {
+        val wm = windowManager ?: return
+        val hv = highlightView ?: return
+        try {
+            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
+            val highlightParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                layoutType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or 
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or 
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            wm.updateViewLayout(hv, highlightParams)
+            hv.requestLayout()
+            hv.invalidate()
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal memperbarui layout highlightView", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -192,6 +244,606 @@ class OverlayService : Service() {
         }
 
         return pinView
+    }
+
+    private fun dismissCalibrationDialog() {
+        activeCalibrationDialogView?.let {
+            try {
+                windowManager?.removeView(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing calibration dialog view", e)
+            }
+            activeCalibrationDialogView = null
+        }
+    }
+
+    private fun getRealScreenMetrics(): DisplayMetrics {
+        val metrics = DisplayMetrics()
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+        val wm = windowManager ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+        if (defaultDisplay != null) {
+            @Suppress("DEPRECATION")
+            defaultDisplay.getRealMetrics(metrics)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.maximumWindowMetrics.bounds
+            metrics.widthPixels = bounds.width()
+            metrics.heightPixels = bounds.height()
+            metrics.densityDpi = resources.configuration.densityDpi
+        } else {
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+        }
+
+        val mode = CalibrationPrefs.getOrientationMode(this)
+        val rotation = defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val isLandscape = when (mode) {
+            CalibrationPrefs.MODE_LANDSCAPE -> true
+            CalibrationPrefs.MODE_PORTRAIT -> false
+            else -> rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270 || (metrics.widthPixels > metrics.heightPixels)
+        }
+
+        if (isLandscape && metrics.widthPixels < metrics.heightPixels) {
+            val temp = metrics.widthPixels
+            metrics.widthPixels = metrics.heightPixels
+            metrics.heightPixels = temp
+        } else if (!isLandscape && metrics.widthPixels > metrics.heightPixels) {
+            val temp = metrics.widthPixels
+            metrics.widthPixels = metrics.heightPixels
+            metrics.heightPixels = temp
+        }
+        return metrics
+    }
+
+    private fun showCalibrationDialog() {
+        dismissCalibrationDialog()
+        val wm = windowManager ?: return
+        val context = this
+        val density = resources.displayMetrics.density
+
+        val realMetrics = getRealScreenMetrics()
+        val realW = realMetrics.widthPixels
+        val realH = realMetrics.heightPixels
+        val isLandscape = realW > realH
+
+        var currentMode = CalibrationPrefs.getOrientationMode(context)
+        var currentOffsetX = CalibrationPrefs.getGlobalOffsetX(context)
+        var currentOffsetY = CalibrationPrefs.getGlobalOffsetY(context)
+
+        // Main full-screen translucent overlay container
+        val rootLayout = FrameLayout(context).apply {
+            setBackgroundColor(Color.parseColor("#99000000"))
+        }
+
+        // Dialog Card
+        val dialogCard = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(16).toFloat()
+                setColor(Color.parseColor("#161922"))
+                setStroke(dpToPx(2), Color.parseColor("#FFD700"))
+            }
+            background = bg
+
+            val lp = FrameLayout.LayoutParams(
+                (340 * density).toInt(),
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER
+            }
+            layoutParams = lp
+        }
+
+        // Header Row
+        val headerRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(10) }
+        }
+
+        val titleText = TextView(context).apply {
+            text = "🎯 Kalibrasi Layar & Titik Klik"
+            setTextColor(Color.parseColor("#FFD700"))
+            textSize = 16f
+            paint.isFakeBoldText = true
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val closeBtn = ImageView(context).apply {
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+            setColorFilter(Color.parseColor("#8899A6"))
+            setPadding(dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(4))
+            setOnClickListener { dismissCalibrationDialog() }
+        }
+        headerRow.addView(titleText)
+        headerRow.addView(closeBtn)
+        dialogCard.addView(headerRow)
+
+        // Scrollview
+        val scrollView = ScrollView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (380 * density).toInt()
+            )
+        }
+
+        val contentLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // 1. Info Layar Saat Ini
+        val screenInfoBox = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(10), dpToPx(8), dpToPx(10), dpToPx(8))
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#222834"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(10) }
+        }
+        val screenResText = TextView(context).apply {
+            text = "Resolusi Layar: ${realW} × ${realH} px"
+            setTextColor(Color.parseColor("#00E5FF"))
+            textSize = 12f
+            paint.isFakeBoldText = true
+        }
+        val screenOrientText = TextView(context).apply {
+            text = "Orientasi Saat Ini: ${if (isLandscape) "Miring (Landscape)" else "Tegak (Portrait)"}"
+            setTextColor(Color.parseColor("#B0BEC5"))
+            textSize = 12f
+        }
+        screenInfoBox.addView(screenResText)
+        screenInfoBox.addView(screenOrientText)
+        contentLayout.addView(screenInfoBox)
+
+        // 2. Mode Orientasi Paksa
+        val modeLabel = TextView(context).apply {
+            text = "Mode Orientasi Layar:"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            paint.isFakeBoldText = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(4) }
+        }
+        contentLayout.addView(modeLabel)
+
+        val modeRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(12) }
+        }
+
+        val btnAuto = Button(context)
+        val btnLandscape = Button(context)
+        val btnPortrait = Button(context)
+
+        fun updateModeButtons() {
+            val selectedBg = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#00E5FF"))
+            }
+            btnAuto.apply {
+                background = if (currentMode == CalibrationPrefs.MODE_AUTO) selectedBg else GradientDrawable().apply {
+                    cornerRadius = dpToPx(8).toFloat()
+                    setColor(Color.parseColor("#2A313E"))
+                }
+                setTextColor(if (currentMode == CalibrationPrefs.MODE_AUTO) Color.BLACK else Color.WHITE)
+            }
+            btnLandscape.apply {
+                background = if (currentMode == CalibrationPrefs.MODE_LANDSCAPE) selectedBg else GradientDrawable().apply {
+                    cornerRadius = dpToPx(8).toFloat()
+                    setColor(Color.parseColor("#2A313E"))
+                }
+                setTextColor(if (currentMode == CalibrationPrefs.MODE_LANDSCAPE) Color.BLACK else Color.WHITE)
+            }
+            btnPortrait.apply {
+                background = if (currentMode == CalibrationPrefs.MODE_PORTRAIT) selectedBg else GradientDrawable().apply {
+                    cornerRadius = dpToPx(8).toFloat()
+                    setColor(Color.parseColor("#2A313E"))
+                }
+                setTextColor(if (currentMode == CalibrationPrefs.MODE_PORTRAIT) Color.BLACK else Color.WHITE)
+            }
+        }
+
+        btnAuto.apply {
+            text = "Otomatis"
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f).apply { rightMargin = dpToPx(4) }
+            setOnClickListener {
+                currentMode = CalibrationPrefs.MODE_AUTO
+                CalibrationPrefs.setOrientationMode(context, currentMode)
+                updateModeButtons()
+                Toast.makeText(context, "Orientasi diatur ke Otomatis", Toast.LENGTH_SHORT).show()
+            }
+        }
+        btnLandscape.apply {
+            text = "Landscape"
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f).apply { rightMargin = dpToPx(4) }
+            setOnClickListener {
+                currentMode = CalibrationPrefs.MODE_LANDSCAPE
+                CalibrationPrefs.setOrientationMode(context, currentMode)
+                updateModeButtons()
+                Toast.makeText(context, "Orientasi dipaksa ke Landscape (Miring)", Toast.LENGTH_SHORT).show()
+            }
+        }
+        btnPortrait.apply {
+            text = "Portrait"
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f)
+            setOnClickListener {
+                currentMode = CalibrationPrefs.MODE_PORTRAIT
+                CalibrationPrefs.setOrientationMode(context, currentMode)
+                updateModeButtons()
+                Toast.makeText(context, "Orientasi dipaksa ke Portrait (Tegak)", Toast.LENGTH_SHORT).show()
+            }
+        }
+        updateModeButtons()
+        modeRow.addView(btnAuto)
+        modeRow.addView(btnLandscape)
+        modeRow.addView(btnPortrait)
+        contentLayout.addView(modeRow)
+
+        // 3. Kalibrasi Offset Horizontal (X)
+        val xLabel = TextView(context).apply {
+            text = "Geser Titik Tengah Horizontal (X):"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            paint.isFakeBoldText = true
+        }
+        contentLayout.addView(xLabel)
+
+        val xHint = TextView(context).apply {
+            text = "(-) Geser KIRI  |  (+) Geser KANAN"
+            setTextColor(Color.parseColor("#8899A6"))
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(4) }
+        }
+        contentLayout.addView(xHint)
+
+        val xControlRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(12) }
+        }
+
+        val editX = EditText(context).apply {
+            setText(currentOffsetX.toString())
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            setTextColor(Color.parseColor("#00E5FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            gravity = Gravity.CENTER
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(6).toFloat()
+                setColor(Color.parseColor("#222834"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f).apply {
+                leftMargin = dpToPx(4)
+                rightMargin = dpToPx(4)
+            }
+        }
+
+        fun makeStepButton(label: String, delta: Int, onApply: (Int) -> Unit): Button {
+            return Button(context).apply {
+                text = label
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                val bg = GradientDrawable().apply {
+                    cornerRadius = dpToPx(6).toFloat()
+                    setColor(Color.parseColor("#2A313E"))
+                }
+                background = bg
+                layoutParams = LinearLayout.LayoutParams(dpToPx(40), dpToPx(36)).apply {
+                    rightMargin = dpToPx(2)
+                }
+                setOnClickListener {
+                    onApply(delta)
+                }
+            }
+        }
+
+        val btnXMinus50 = makeStepButton("-50", -50) { delta ->
+            val cur = editX.text.toString().toIntOrNull() ?: currentOffsetX
+            currentOffsetX = cur + delta
+            editX.setText(currentOffsetX.toString())
+        }
+        val btnXMinus10 = makeStepButton("-10", -10) { delta ->
+            val cur = editX.text.toString().toIntOrNull() ?: currentOffsetX
+            currentOffsetX = cur + delta
+            editX.setText(currentOffsetX.toString())
+        }
+        val btnXPlus10 = makeStepButton("+10", 10) { delta ->
+            val cur = editX.text.toString().toIntOrNull() ?: currentOffsetX
+            currentOffsetX = cur + delta
+            editX.setText(currentOffsetX.toString())
+        }
+        val btnXPlus50 = makeStepButton("+50", 50) { delta ->
+            val cur = editX.text.toString().toIntOrNull() ?: currentOffsetX
+            currentOffsetX = cur + delta
+            editX.setText(currentOffsetX.toString())
+        }
+        xControlRow.addView(btnXMinus50)
+        xControlRow.addView(btnXMinus10)
+        xControlRow.addView(editX)
+        xControlRow.addView(btnXPlus10)
+        xControlRow.addView(btnXPlus50)
+        contentLayout.addView(xControlRow)
+
+        // 4. Kalibrasi Offset Vertikal (Y)
+        val yLabel = TextView(context).apply {
+            text = "Geser Titik Tengah Vertikal (Y):"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            paint.isFakeBoldText = true
+        }
+        contentLayout.addView(yLabel)
+
+        val yHint = TextView(context).apply {
+            text = "(-) Geser ATAS  |  (+) Geser BAWAH"
+            setTextColor(Color.parseColor("#8899A6"))
+            textSize = 11f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(4) }
+        }
+        contentLayout.addView(yHint)
+
+        val yControlRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(14) }
+        }
+
+        val editY = EditText(context).apply {
+            setText(currentOffsetY.toString())
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            setTextColor(Color.parseColor("#00E5FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            gravity = Gravity.CENTER
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(6).toFloat()
+                setColor(Color.parseColor("#222834"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f).apply {
+                leftMargin = dpToPx(4)
+                rightMargin = dpToPx(4)
+            }
+        }
+
+        val btnYMinus50 = makeStepButton("-50", -50) { delta ->
+            val cur = editY.text.toString().toIntOrNull() ?: currentOffsetY
+            currentOffsetY = cur + delta
+            editY.setText(currentOffsetY.toString())
+        }
+        val btnYMinus10 = makeStepButton("-10", -10) { delta ->
+            val cur = editY.text.toString().toIntOrNull() ?: currentOffsetY
+            currentOffsetY = cur + delta
+            editY.setText(currentOffsetY.toString())
+        }
+        val btnYPlus10 = makeStepButton("+10", 10) { delta ->
+            val cur = editY.text.toString().toIntOrNull() ?: currentOffsetY
+            currentOffsetY = cur + delta
+            editY.setText(currentOffsetY.toString())
+        }
+        val btnYPlus50 = makeStepButton("+50", 50) { delta ->
+            val cur = editY.text.toString().toIntOrNull() ?: currentOffsetY
+            currentOffsetY = cur + delta
+            editY.setText(currentOffsetY.toString())
+        }
+        yControlRow.addView(btnYMinus50)
+        yControlRow.addView(btnYMinus10)
+        yControlRow.addView(editY)
+        yControlRow.addView(btnYPlus10)
+        yControlRow.addView(btnYPlus50)
+        contentLayout.addView(yControlRow)
+
+        // 5. Tombol Uji Klik / Test Tap
+        val btnTestTap = Button(context).apply {
+            text = "🎯 Uji Ketuk (Tes Titik Klik Sekarang)"
+            setTextColor(Color.BLACK)
+            textSize = 13f
+            paint.isFakeBoldText = true
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#00E5FF"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(40)
+            ).apply { bottomMargin = dpToPx(14) }
+
+            setOnClickListener {
+                val offX = editX.text.toString().toIntOrNull() ?: currentOffsetX
+                val offY = editY.text.toString().toIntOrNull() ?: currentOffsetY
+                currentOffsetX = offX
+                currentOffsetY = offY
+
+                val testX = ((realW / 2f) + offX).coerceIn(0f, realW.toFloat())
+                val testY = ((realH / 2f) + offY).coerceIn(0f, realH.toFloat())
+
+                val testRect = Rect(
+                    (testX - 40).toInt().coerceAtLeast(0),
+                    (testY - 40).toInt().coerceAtLeast(0),
+                    (testX + 40).toInt(),
+                    (testY + 40).toInt()
+                )
+                highlightView?.showHighlight(testRect, testX, testY, "Uji Titik Klik")
+
+                serviceScope.launch {
+                    val tapped = TapAccessibilityService.performTapSuspend(testX, testY)
+                    withContext(Dispatchers.Main) {
+                        if (tapped) {
+                            Toast.makeText(context, "Ketukan diuji di (${testX.toInt()}, ${testY.toInt()})", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "⚠️ Aksesibilitas tidak aktif. Aktifkan di pengaturan.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
+        contentLayout.addView(btnTestTap)
+
+        // 6. Batas Layar / Margin Notch Preset (Mirip Crop)
+        val boundsLabel = TextView(context).apply {
+            text = "Batas Tepi Layar Game (Safe-Margin Notch):"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            paint.isFakeBoldText = true
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(4) }
+        }
+        contentLayout.addView(boundsLabel)
+
+        val boundsRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dpToPx(14) }
+        }
+
+        fun makeBoundsButton(label: String, margin: Int): Button {
+            return Button(context).apply {
+                text = label
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                val bg = GradientDrawable().apply {
+                    cornerRadius = dpToPx(8).toFloat()
+                    setColor(Color.parseColor("#2A313E"))
+                }
+                background = bg
+                layoutParams = LinearLayout.LayoutParams(0, dpToPx(36), 1f).apply {
+                    rightMargin = dpToPx(4)
+                }
+                setOnClickListener {
+                    CalibrationPrefs.setMargins(context, margin, 0, margin, 0)
+                    Toast.makeText(context, "Batas layar: margin $margin px", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        boundsRow.addView(makeBoundsButton("Penuh (0px)", 0))
+        boundsRow.addView(makeBoundsButton("Notch 60px", 60))
+        boundsRow.addView(makeBoundsButton("Notch 100px", 100))
+        contentLayout.addView(boundsRow)
+
+        scrollView.addView(contentLayout)
+        dialogCard.addView(scrollView)
+
+        // Footer Action Buttons
+        val actionRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dpToPx(12) }
+        }
+
+        val btnReset = Button(context).apply {
+            text = "Reset 0"
+            setTextColor(Color.parseColor("#FF9800"))
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#222834"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(40), 1f).apply {
+                rightMargin = dpToPx(6)
+            }
+            setOnClickListener {
+                CalibrationPrefs.reset(context)
+                currentOffsetX = 0
+                currentOffsetY = 0
+                editX.setText("0")
+                editY.setText("0")
+                currentMode = CalibrationPrefs.MODE_AUTO
+                updateModeButtons()
+                Toast.makeText(context, "Kalibrasi di-reset ke default", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        val btnSave = Button(context).apply {
+            text = "Simpan & Terapkan"
+            setTextColor(Color.BLACK)
+            paint.isFakeBoldText = true
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#00E5FF"))
+            }
+            background = bg
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(40), 1.5f)
+            setOnClickListener {
+                val offX = editX.text.toString().toIntOrNull() ?: currentOffsetX
+                val offY = editY.text.toString().toIntOrNull() ?: currentOffsetY
+                CalibrationPrefs.setGlobalOffsetX(context, offX)
+                CalibrationPrefs.setGlobalOffsetY(context, offY)
+                CalibrationPrefs.setOrientationMode(context, currentMode)
+                Toast.makeText(context, "Kalibrasi tersimpan! Offset: ($offX, $offY)", Toast.LENGTH_SHORT).show()
+                dismissCalibrationDialog()
+            }
+        }
+
+        actionRow.addView(btnReset)
+        actionRow.addView(btnSave)
+        dialogCard.addView(actionRow)
+
+        rootLayout.addView(dialogCard)
+        rootLayout.setOnClickListener {
+            dismissCalibrationDialog()
+        }
+        dialogCard.setOnClickListener {
+            // consume clicks
+        }
+
+        val dialogParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+
+        activeCalibrationDialogView = rootLayout
+        try {
+            wm.addView(rootLayout, dialogParams)
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal menampilkan dialog kalibrasi", e)
+        }
     }
 
     private fun dismissPinConfigDialog() {
@@ -915,7 +1567,52 @@ class OverlayService : Service() {
             }
             addView(togglePinsButton)
 
-            // Button 5: Stop/Close Overlay
+            // Button 5: Kalibrasi Titik & Batas Layar
+            val calibrateButton = ImageView(context).apply {
+                setImageResource(android.R.drawable.ic_menu_crop)
+                setColorFilter(Color.parseColor("#FFD700")) // Gold
+                setPadding(dpToPx(6), dpToPx(6), dpToPx(6), dpToPx(6))
+                layoutParams = LinearLayout.LayoutParams(dpToPx(36), dpToPx(36)).apply {
+                    rightMargin = dpToPx(6)
+                }
+                isClickable = true
+                contentDescription = "Kalibrasi Titik & Batas Layar"
+                
+                val bg = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#222834"))
+                }
+                background = bg
+
+                setOnClickListener {
+                    showCalibrationDialog()
+                }
+            }
+            addView(calibrateButton)
+
+            // Button 6: Minimize / Collapse
+            val minimizeButton = ImageView(context).apply {
+                setImageResource(android.R.drawable.ic_media_previous)
+                setColorFilter(Color.parseColor("#AAAAAA"))
+                setPadding(dpToPx(6), dpToPx(6), dpToPx(6), dpToPx(6))
+                layoutParams = LinearLayout.LayoutParams(dpToPx(36), dpToPx(36)).apply {
+                    rightMargin = dpToPx(6)
+                }
+                isClickable = true
+                
+                val bg = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#222834"))
+                }
+                background = bg
+
+                setOnClickListener {
+                    setExpanded(false)
+                }
+            }
+            addView(minimizeButton)
+
+            // Button 6: Stop/Close Overlay
             val stopButton = ImageView(context).apply {
                 setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
                 setColorFilter(Color.parseColor("#FF1744")) // Vibrant Red
@@ -1039,6 +1736,17 @@ class OverlayService : Service() {
         }
     }
 
+    private fun setExpanded(expanded: Boolean) {
+        isExpanded = expanded
+        if (isExpanded) {
+            collapsedLayout?.visibility = View.GONE
+            expandedLayout?.visibility = View.VISIBLE
+        } else {
+            collapsedLayout?.visibility = View.VISIBLE
+            expandedLayout?.visibility = View.GONE
+        }
+    }
+
     private fun setupDragListener() {
         overlayView?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
@@ -1078,14 +1786,8 @@ class OverlayService : Service() {
                     }
                     MotionEvent.ACTION_UP -> {
                         if (!isDragging) {
-                            // Toggles Expanded / Collapsed state upon click
-                            isExpanded = !isExpanded
-                            if (isExpanded) {
-                                collapsedLayout?.visibility = View.GONE
-                                expandedLayout?.visibility = View.VISIBLE
-                            } else {
-                                collapsedLayout?.visibility = View.VISIBLE
-                                expandedLayout?.visibility = View.GONE
+                            if (!isExpanded) {
+                                setExpanded(true)
                             }
                         }
                         return true
@@ -1103,6 +1805,13 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        displayListener?.let {
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            dm?.unregisterDisplayListener(it)
+            displayListener = null
+        }
+        dismissCalibrationDialog()
+        dismissPinConfigDialog()
         clearAllPins()
         overlayView?.let {
             try { windowManager?.removeView(it) } catch (e: Exception) {}

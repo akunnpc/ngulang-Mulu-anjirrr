@@ -101,8 +101,10 @@ class TargetPinView(
                     if (!isDragging) {
                         onPinClicked(this)
                     } else {
-                        val centerX = layoutParamsRef.x + width / 2f
-                        val centerY = layoutParamsRef.y + height / 2f
+                        val w = if (width > 0) width.toFloat() else layoutParamsRef.width.toFloat()
+                        val h = if (height > 0) height.toFloat() else layoutParamsRef.height.toFloat()
+                        val centerX = layoutParamsRef.x + w / 2f
+                        val centerY = layoutParamsRef.y + h / 2f
                         onPositionChanged(this, centerX, centerY)
                     }
                     true

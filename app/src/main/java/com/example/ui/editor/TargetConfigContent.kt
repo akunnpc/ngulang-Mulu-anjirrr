@@ -42,7 +42,9 @@ data class TargetConfigData(
     val regionX: Int,
     val regionY: Int,
     val regionWidth: Int,
-    val regionHeight: Int
+    val regionHeight: Int,
+    val offsetX: Int = 0,
+    val offsetY: Int = 0
 )
 
 @Composable
@@ -66,6 +68,10 @@ fun TargetConfigContent(
     var actionType by remember { mutableStateOf("TAP") }
     var holdDurationMsText by remember { mutableStateOf("2000") }
     var allowMultiMatch by remember { mutableStateOf(false) }
+    var offsetX by remember { mutableIntStateOf(0) }
+    var offsetY by remember { mutableIntStateOf(0) }
+    var offsetXText by remember { mutableStateOf("0") }
+    var offsetYText by remember { mutableStateOf("0") }
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
         focusedBorderColor = CyberCyan,
@@ -375,6 +381,313 @@ fun TargetConfigContent(
             }
         }
 
+        // Kompensasi Posisi Sentuh (Offset X & Y) Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, BorderSlate, RoundedCornerShape(16.dp)),
+            colors = CardDefaults.cardColors(containerColor = SlateCardBg)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Kompensasi Posisi Klik (Offset)",
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = "X: ${if (offsetX > 0) "+$offsetX" else "$offsetX"} px | Y: ${if (offsetY > 0) "+$offsetY" else "$offsetY"} px",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = CyberCyan
+                    )
+                }
+
+                Text(
+                    text = "Gunakan nilai negatif (-) untuk menggeser klik ke KIRI / ATAS, atau nilai positif (+) untuk menggeser ke KANAN / BAWAH.",
+                    fontSize = 11.sp,
+                    color = TextMuted,
+                    lineHeight = 15.sp
+                )
+
+                // 1. Pengaturan Offset X (Horizontal / Kiri - Kanan)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Offset X (Horizontal):",
+                            fontSize = 12.sp,
+                            color = TextLight,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            when {
+                                offsetX < 0 -> "← Geser ke KIRI ${-offsetX} px"
+                                offsetX > 0 -> "Geser ke KANAN $offsetX px →"
+                                else -> "Tepat di Tengah (0 px)"
+                            },
+                            fontSize = 11.sp,
+                            color = if (offsetX != 0) CyberCyan else TextMuted,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetX - 10
+                                offsetX = newVal
+                                offsetXText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("-10", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetX - 5
+                                offsetX = newVal
+                                offsetXText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("-5", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedTextField(
+                            value = offsetXText,
+                            onValueChange = {
+                                offsetXText = it
+                                offsetX = it.toIntOrNull() ?: 0
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = textFieldColors,
+                            shape = RoundedCornerShape(8.dp),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetX + 5
+                                offsetX = newVal
+                                offsetXText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("+5", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetX + 10
+                                offsetX = newVal
+                                offsetXText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("+10", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // Presets X Cepat
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf(-50, -25, -10, 0, 10, 25, 50).forEach { value ->
+                            val isCurrent = offsetX == value
+                            OutlinedButton(
+                                onClick = {
+                                    offsetX = value
+                                    offsetXText = value.toString()
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (isCurrent) CyberCyan.copy(alpha = 0.25f) else Color.Transparent,
+                                    contentColor = if (isCurrent) CyberCyan else TextMuted
+                                ),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (isCurrent) CyberCyan else BorderSlate.copy(alpha = 0.6f)
+                                )
+                            ) {
+                                Text(
+                                    text = if (value > 0) "+$value" else "$value",
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 2. Pengaturan Offset Y (Vertikal / Atas - Bawah)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Offset Y (Vertikal):",
+                            fontSize = 12.sp,
+                            color = TextLight,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            when {
+                                offsetY < 0 -> "↑ Geser ke ATAS ${-offsetY} px"
+                                offsetY > 0 -> "Geser ke BAWAH $offsetY px ↓"
+                                else -> "Tepat di Tengah (0 px)"
+                            },
+                            fontSize = 11.sp,
+                            color = if (offsetY != 0) CyberCyan else TextMuted,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetY - 10
+                                offsetY = newVal
+                                offsetYText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("-10", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetY - 5
+                                offsetY = newVal
+                                offsetYText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("-5", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedTextField(
+                            value = offsetYText,
+                            onValueChange = {
+                                offsetYText = it
+                                offsetY = it.toIntOrNull() ?: 0
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = textFieldColors,
+                            shape = RoundedCornerShape(8.dp),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetY + 5
+                                offsetY = newVal
+                                offsetYText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("+5", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val newVal = offsetY + 10
+                                offsetY = newVal
+                                offsetYText = newVal.toString()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSlate)
+                        ) {
+                            Text("+10", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // Presets Y Cepat
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf(-50, -25, -10, 0, 10, 25, 50).forEach { value ->
+                            val isCurrent = offsetY == value
+                            OutlinedButton(
+                                onClick = {
+                                    offsetY = value
+                                    offsetYText = value.toString()
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (isCurrent) CyberCyan.copy(alpha = 0.25f) else Color.Transparent,
+                                    contentColor = if (isCurrent) CyberCyan else TextMuted
+                                ),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (isCurrent) CyberCyan else BorderSlate.copy(alpha = 0.6f)
+                                )
+                            ) {
+                                Text(
+                                    text = if (value > 0) "+$value" else "$value",
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // Save Target Button
@@ -400,7 +713,9 @@ fun TargetConfigContent(
                         regionX = regX.toIntOrNull() ?: 0,
                         regionY = regY.toIntOrNull() ?: 0,
                         regionWidth = regW.toIntOrNull() ?: 300,
-                        regionHeight = regH.toIntOrNull() ?: 300
+                        regionHeight = regH.toIntOrNull() ?: 300,
+                        offsetX = offsetX,
+                        offsetY = offsetY
                     )
                 )
             },

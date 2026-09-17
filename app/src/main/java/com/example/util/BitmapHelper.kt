@@ -13,8 +13,9 @@ object BitmapHelper {
 
     fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? {
         return try {
-            val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-            BitmapFactory.decodeStream(inputStream)
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                BitmapFactory.decodeStream(inputStream)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -29,15 +30,20 @@ object BitmapHelper {
         bottomPct: Float
     ): Bitmap? {
         return try {
-            val x = (leftPct * bitmap.width).toInt()
-            val y = (topPct * bitmap.height).toInt()
-            val width = ((rightPct - leftPct) * bitmap.width).toInt()
-            val height = ((bottomPct - topPct) * bitmap.height).toInt()
+            val minX = minOf(leftPct, rightPct).coerceIn(0f, 1f)
+            val maxX = maxOf(leftPct, rightPct).coerceIn(0f, 1f)
+            val minY = minOf(topPct, bottomPct).coerceIn(0f, 1f)
+            val maxY = maxOf(topPct, bottomPct).coerceIn(0f, 1f)
+
+            val x = (minX * bitmap.width).toInt()
+            val y = (minY * bitmap.height).toInt()
+            val rawW = ((maxX - minX) * bitmap.width).toInt()
+            val rawH = ((maxY - minY) * bitmap.height).toInt()
 
             val startX = x.coerceIn(0, bitmap.width - 1)
             val startY = y.coerceIn(0, bitmap.height - 1)
-            val rectWidth = width.coerceIn(1, bitmap.width - startX)
-            val rectHeight = height.coerceIn(1, bitmap.height - startY)
+            val rectWidth = rawW.coerceIn(1, bitmap.width - startX)
+            val rectHeight = rawH.coerceIn(1, bitmap.height - startY)
 
             Bitmap.createBitmap(bitmap, startX, startY, rectWidth, rectHeight)
         } catch (e: Exception) {
@@ -49,10 +55,10 @@ object BitmapHelper {
     fun saveBitmapToFile(context: Context, bitmap: Bitmap, prefix: String = "target"): File {
         val filename = "${prefix}_${UUID.randomUUID()}.png"
         val targetFile = File(context.filesDir, filename)
-        val out = FileOutputStream(targetFile)
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-        out.flush()
-        out.close()
+        FileOutputStream(targetFile).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            out.flush()
+        }
         return targetFile
     }
 }

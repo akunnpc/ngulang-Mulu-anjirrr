@@ -50,7 +50,9 @@ data class TargetImage(
     val targetType: String = "IMAGE", // "IMAGE" or "POINT"
     val pointX: Float = 0f,
     val pointY: Float = 0f,
-    val allowMultiMatch: Boolean = false
+    val allowMultiMatch: Boolean = false,
+    val offsetX: Int = 0,
+    val offsetY: Int = 0
 )
 
 data class ProfileWithTargets(
@@ -102,7 +104,7 @@ interface AutoTapDao {
     suspend fun deleteTargetsForProfile(profileId: Long)
 }
 
-@Database(entities = [Profile::class, TargetImage::class], version = 6, exportSchema = false)
+@Database(entities = [Profile::class, TargetImage::class], version = 7, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun autoTapDao(): AutoTapDao
 
@@ -145,6 +147,13 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE target_images ADD COLUMN offsetX INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE target_images ADD COLUMN offsetY INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -152,7 +161,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "autotap_database"
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

@@ -87,6 +87,7 @@ fun ProfileEditorScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
+    var currentProfileId by remember { mutableStateOf(profileId) }
     var profileName by remember { mutableStateOf("") }
     var captureInterval by remember { mutableStateOf("500") }
     var packageName by remember { mutableStateOf("") }
@@ -104,11 +105,13 @@ fun ProfileEditorScreen(
     var showPointConfigDialog by remember { mutableStateOf(false) }
     var editingPointTarget by remember { mutableStateOf<TargetImage?>(null) }
 
-    val profileWithTargets by if (profileId != -1L) {
-        repository.getProfileWithTargets(profileId).collectAsStateWithLifecycle(initialValue = null)
-    } else {
-        remember { mutableStateOf(null) }
-    }
+    val profileWithTargets by remember(currentProfileId) {
+        if (currentProfileId != -1L) {
+            repository.getProfileWithTargets(currentProfileId)
+        } else {
+            kotlinx.coroutines.flow.flowOf(null)
+        }
+    }.collectAsStateWithLifecycle(initialValue = null)
 
     LaunchedEffect(profileWithTargets) {
         profileWithTargets?.let { pwt ->
@@ -452,22 +455,20 @@ fun ProfileEditorScreen(
                                     canMoveDown = index < sortedTargets.size - 1,
                                     onMoveUp = {
                                         coroutineScope.launch {
-                                            val prevTarget = sortedTargets[index - 1]
-                                            val currentPriority = target.priority
-                                            val prevPriority = prevTarget.priority
-                                            val newCurrentPriority = if (currentPriority == prevPriority) prevPriority - 1 else prevPriority
-                                            repository.updateTargetImage(target.copy(priority = newCurrentPriority))
-                                            repository.updateTargetImage(prevTarget.copy(priority = currentPriority))
+                                            val mutable = sortedTargets.toMutableList()
+                                            java.util.Collections.swap(mutable, index, index - 1)
+                                            mutable.forEachIndexed { i, t ->
+                                                repository.updateTargetImage(t.copy(priority = i))
+                                            }
                                         }
                                     },
                                     onMoveDown = {
                                         coroutineScope.launch {
-                                            val nextTarget = sortedTargets[index + 1]
-                                            val currentPriority = target.priority
-                                            val nextPriority = nextTarget.priority
-                                            val newCurrentPriority = if (currentPriority == nextPriority) nextPriority + 1 else nextPriority
-                                            repository.updateTargetImage(target.copy(priority = newCurrentPriority))
-                                            repository.updateTargetImage(nextTarget.copy(priority = currentPriority))
+                                            val mutable = sortedTargets.toMutableList()
+                                            java.util.Collections.swap(mutable, index, index + 1)
+                                            mutable.forEachIndexed { i, t ->
+                                                repository.updateTargetImage(t.copy(priority = i))
+                                            }
                                         }
                                     },
                                     onEditPoint = {
@@ -498,10 +499,10 @@ fun ProfileEditorScreen(
                                     return@Button
                                 }
                                 coroutineScope.launch {
-                                    if (profileId == -1L) {
+                                    if (currentProfileId == -1L) {
                                         repository.insertProfile(
                                             Profile(
-                                                name = profileName,
+                                                name = profileName.trim(),
                                                 captureIntervalMs = interval,
                                                 packageName = packageName,
                                                 appName = appName,
@@ -511,8 +512,8 @@ fun ProfileEditorScreen(
                                     } else {
                                         repository.updateProfile(
                                             Profile(
-                                                id = profileId,
-                                                name = profileName,
+                                                id = currentProfileId,
+                                                name = profileName.trim(),
                                                 captureIntervalMs = interval,
                                                 packageName = packageName,
                                                 appName = appName,
@@ -570,18 +571,23 @@ fun ProfileEditorScreen(
                             totalExistingPoints = targetImages.count { it.targetType == "POINT" },
                             onSavePoint = { name, x, y, delayMs, actionType, holdMs ->
                                 coroutineScope.launch(Dispatchers.IO) {
-                                    var pId = profileId
+                                    var pId = currentProfileId
                                     if (pId == -1L) {
                                         val interval = captureInterval.toLongOrNull() ?: 500L
+                                        val nameToSave = profileName.ifBlank { "Profil Baru" }
                                         pId = repository.insertProfile(
                                             Profile(
-                                                name = profileName,
+                                                name = nameToSave,
                                                 captureIntervalMs = interval,
                                                 packageName = packageName,
                                                 appName = appName,
                                                 loopSequence = loopSequence
                                             )
                                         )
+                                        withContext(Dispatchers.Main) {
+                                            currentProfileId = pId
+                                            if (profileName.isBlank()) profileName = nameToSave
+                                        }
                                     }
 
                                     val existing = editingPointTarget
@@ -649,18 +655,23 @@ fun ProfileEditorScreen(
                                 coroutineScope.launch(Dispatchers.IO) {
                                     val targetFile = BitmapHelper.saveBitmapToFile(context, cropped, "target")
 
-                                    var pId = profileId
+                                    var pId = currentProfileId
                                     if (pId == -1L) {
                                         val interval = captureInterval.toLongOrNull() ?: 500L
+                                        val nameToSave = profileName.ifBlank { "Profil Baru" }
                                         pId = repository.insertProfile(
                                             Profile(
-                                                name = profileName,
+                                                name = nameToSave,
                                                 captureIntervalMs = interval,
                                                 packageName = packageName,
                                                 appName = appName,
                                                 loopSequence = loopSequence
                                             )
                                         )
+                                        withContext(Dispatchers.Main) {
+                                            currentProfileId = pId
+                                            if (profileName.isBlank()) profileName = nameToSave
+                                        }
                                     }
 
                                     val targetImage = TargetImage(
@@ -678,7 +689,9 @@ fun ProfileEditorScreen(
                                         regionHeight = data.regionHeight,
                                         timeoutSeconds = data.timeoutSeconds,
                                         actionType = data.actionType,
-                                        holdDurationMs = data.holdDurationMs
+                                        holdDurationMs = data.holdDurationMs,
+                                        offsetX = data.offsetX,
+                                        offsetY = data.offsetY
                                     )
 
                                     repository.insertTargetImage(targetImage)

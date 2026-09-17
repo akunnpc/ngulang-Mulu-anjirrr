@@ -8,10 +8,20 @@ import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 object ImageMatcher {
     private const val TAG = "ImageMatcher"
     private var isOpenCVInitialized = false
+
+    private data class CachedTemplate(
+        val lastModified: Long,
+        val grayTargetMat: Mat,
+        val width: Int,
+        val height: Int
+    )
+
+    private val templateCache = ConcurrentHashMap<String, CachedTemplate>()
 
     init {
         initOpenCV()
@@ -24,6 +34,44 @@ object ImageMatcher {
         return isOpenCVInitialized
     }
 
+    fun clearCache() {
+        templateCache.values.forEach { 
+            try { it.grayTargetMat.release() } catch (e: Exception) {} 
+        }
+        templateCache.clear()
+    }
+
+    private fun getOrLoadTemplate(path: String): CachedTemplate? {
+        val file = File(path)
+        if (!file.exists()) return null
+        val lastMod = file.lastModified()
+        val cached = templateCache[path]
+        if (cached != null && cached.lastModified == lastMod) {
+            return cached
+        }
+
+        try {
+            cached?.grayTargetMat?.release()
+        } catch (e: Exception) {}
+
+        val bmp = BitmapFactory.decodeFile(path) ?: return null
+        return try {
+            val colorMat = Mat()
+            Utils.bitmapToMat(bmp, colorMat)
+            val grayMat = Mat()
+            Imgproc.cvtColor(colorMat, grayMat, Imgproc.COLOR_RGBA2GRAY)
+            colorMat.release()
+            val template = CachedTemplate(lastMod, grayMat, bmp.width, bmp.height)
+            templateCache[path] = template
+            template
+        } catch (e: Exception) {
+            Log.e(TAG, "Error caching template for $path", e)
+            null
+        } finally {
+            bmp.recycle()
+        }
+    }
+
     data class MatchResult(
         val isMatched: Boolean,
         val confidence: Float,
@@ -34,15 +82,6 @@ object ImageMatcher {
 
     /**
      * Matches a target image template against a screen capture bitmap.
-     * 
-     * @param screenBitmap The current screen capture.
-     * @param targetImagePath Path to the target image file on internal storage.
-     * @param threshold Confidence threshold (default 0.8).
-     * @param restrictRegion True to restrict matching to a specific rectangular sub-region.
-     * @param rx X coordinate of region.
-     * @param ry Y coordinate of region.
-     * @param rw Width of region.
-     * @param rh Height of region.
      */
     fun findMatch(
         screenBitmap: Bitmap,
@@ -59,46 +98,35 @@ object ImageMatcher {
             return MatchResult(false, 0f, 0f, 0f, android.graphics.Rect())
         }
 
-        val targetFile = File(targetImagePath)
-        if (!targetFile.exists()) {
-            Log.e(TAG, "Target image file does not exist: $targetImagePath")
+        val template = getOrLoadTemplate(targetImagePath)
+        if (template == null) {
+            Log.e(TAG, "Target template could not be loaded: $targetImagePath")
             return MatchResult(false, 0f, 0f, 0f, android.graphics.Rect())
         }
 
         var screenMat: Mat? = null
-        var targetMat: Mat? = null
         var resultMat: Mat? = null
         var searchAreaMat: Mat? = null
+        var graySearch: Mat? = null
 
         try {
-            // Load target template as Bitmap, convert to Mat
-            val targetBitmap = BitmapFactory.decodeFile(targetImagePath) ?: return MatchResult(false, 0f, 0f, 0f, android.graphics.Rect())
-            targetMat = Mat()
-            Utils.bitmapToMat(targetBitmap, targetMat)
-
-            // Convert screen Bitmap to Mat
             screenMat = Mat()
             Utils.bitmapToMat(screenBitmap, screenMat)
 
-            // Ensure images are both colored or converted
-            // matchTemplate requires source and template to have the same format (e.g. CV_8UC4 from Utils.bitmapToMat)
-            
             val searchRect: Rect
             if (restrictRegion) {
-                // Ensure the restricted region fits within screen dimensions
                 val startX = rx.coerceIn(0, screenMat.cols() - 1)
                 val startY = ry.coerceIn(0, screenMat.rows() - 1)
                 val endX = (rx + rw).coerceIn(1, screenMat.cols())
                 val endY = (ry + rh).coerceIn(1, screenMat.rows())
-                
+
                 val width = endX - startX
                 val height = endY - startY
 
-                if (width > targetMat.cols() && height > targetMat.rows()) {
+                if (width > template.width && height > template.height) {
                     searchRect = Rect(startX, startY, width, height)
                     searchAreaMat = screenMat.submat(searchRect)
                 } else {
-                    // Region is too small for template size, fall back to full screen
                     searchRect = Rect(0, 0, screenMat.cols(), screenMat.rows())
                     searchAreaMat = screenMat
                 }
@@ -107,44 +135,33 @@ object ImageMatcher {
                 searchAreaMat = screenMat
             }
 
-            // Verify search matrix is larger than template matrix
-            if (searchAreaMat.cols() < targetMat.cols() || searchAreaMat.rows() < targetMat.rows()) {
-                Log.w(TAG, "Search area (${searchAreaMat.cols()}x${searchAreaMat.rows()}) is smaller than target template (${targetMat.cols()}x${targetMat.rows()})")
+            if (searchAreaMat.cols() < template.width || searchAreaMat.rows() < template.height) {
+                Log.w(TAG, "Search area (${searchAreaMat.cols()}x${searchAreaMat.rows()}) is smaller than target template (${template.width}x${template.height})")
                 return MatchResult(false, 0f, 0f, 0f, android.graphics.Rect())
             }
 
-            // Create result matrix to store coefficients
             resultMat = Mat()
-            
-            // Convert to grayscale for robust and fast TM_CCOEFF_NORMED matching (OpenCV requires 1 or 3 channels)
-            val graySearch = Mat()
-            val grayTarget = Mat()
+            graySearch = Mat()
             Imgproc.cvtColor(searchAreaMat, graySearch, Imgproc.COLOR_RGBA2GRAY)
-            Imgproc.cvtColor(targetMat, grayTarget, Imgproc.COLOR_RGBA2GRAY)
-            
-            // Perform matchTemplate
-            Imgproc.matchTemplate(graySearch, grayTarget, resultMat, Imgproc.TM_CCOEFF_NORMED)
-            graySearch.release()
-            grayTarget.release()
 
-            // Find best match locations
+            Imgproc.matchTemplate(graySearch, template.grayTargetMat, resultMat, Imgproc.TM_CCOEFF_NORMED)
+
             val mmr = Core.minMaxLoc(resultMat)
             val maxConfidence = mmr.maxVal.toFloat()
 
             if (maxConfidence >= threshold) {
-                val matchLoc = mmr.maxLoc // Top-left of matched area relative to searchAreaMat
-                
-                // Center of matching area in screen coordinates
-                val targetCenterRelX = matchLoc.x + (targetMat.cols() / 2.0)
-                val targetCenterRelY = matchLoc.y + (targetMat.rows() / 2.0)
+                val matchLoc = mmr.maxLoc
+
+                val targetCenterRelX = matchLoc.x + (template.width / 2.0)
+                val targetCenterRelY = matchLoc.y + (template.height / 2.0)
 
                 val screenX = (searchRect.x + targetCenterRelX).toFloat()
                 val screenY = (searchRect.y + targetCenterRelY).toFloat()
 
                 val screenLeft = (searchRect.x + matchLoc.x).toInt()
                 val screenTop = (searchRect.y + matchLoc.y).toInt()
-                val screenRight = screenLeft + targetMat.cols()
-                val screenBottom = screenTop + targetMat.rows()
+                val screenRight = screenLeft + template.width
+                val screenBottom = screenTop + template.height
 
                 val bounds = android.graphics.Rect(screenLeft, screenTop, screenRight, screenBottom)
 
@@ -159,12 +176,12 @@ object ImageMatcher {
             Log.e(TAG, "Error in matchTemplate", e)
             return MatchResult(false, 0f, 0f, 0f, android.graphics.Rect())
         } finally {
-            screenMat?.release()
-            targetMat?.release()
+            graySearch?.release()
             resultMat?.release()
             if (restrictRegion && searchAreaMat != screenMat) {
                 searchAreaMat?.release()
             }
+            screenMat?.release()
         }
     }
 
@@ -189,23 +206,17 @@ object ImageMatcher {
             return matches
         }
 
-        val targetFile = File(targetImagePath)
-        if (!targetFile.exists()) {
-            Log.e(TAG, "Target image file does not exist: $targetImagePath")
+        val template = getOrLoadTemplate(targetImagePath)
+        if (template == null) {
+            Log.e(TAG, "Target template could not be loaded: $targetImagePath")
             return matches
         }
 
         var screenMat: Mat? = null
-        var targetMat: Mat? = null
         var searchAreaMat: Mat? = null
         var workMat: Mat? = null
-        var grayTarget: Mat? = null
 
         try {
-            val targetBitmap = BitmapFactory.decodeFile(targetImagePath) ?: return matches
-            targetMat = Mat()
-            Utils.bitmapToMat(targetBitmap, targetMat)
-
             screenMat = Mat()
             Utils.bitmapToMat(screenBitmap, screenMat)
 
@@ -218,7 +229,7 @@ object ImageMatcher {
                 val width = endX - startX
                 val height = endY - startY
 
-                if (width > targetMat.cols() && height > targetMat.rows()) {
+                if (width > template.width && height > template.height) {
                     searchRect = Rect(startX, startY, width, height)
                     searchAreaMat = screenMat.submat(searchRect)
                 } else {
@@ -230,20 +241,17 @@ object ImageMatcher {
                 searchAreaMat = screenMat
             }
 
-            if (searchAreaMat.cols() < targetMat.cols() || searchAreaMat.rows() < targetMat.rows()) {
+            if (searchAreaMat.cols() < template.width || searchAreaMat.rows() < template.height) {
                 return matches
             }
 
             workMat = searchAreaMat.clone()
 
-            grayTarget = Mat()
-            Imgproc.cvtColor(targetMat, grayTarget, Imgproc.COLOR_RGBA2GRAY)
-
             for (i in 0 until maxMatches) {
                 val grayWork = Mat()
                 Imgproc.cvtColor(workMat, grayWork, Imgproc.COLOR_RGBA2GRAY)
                 val resultMat = Mat()
-                Imgproc.matchTemplate(grayWork, grayTarget, resultMat, Imgproc.TM_CCOEFF_NORMED)
+                Imgproc.matchTemplate(grayWork, template.grayTargetMat, resultMat, Imgproc.TM_CCOEFF_NORMED)
                 val mmr = Core.minMaxLoc(resultMat)
                 resultMat.release()
                 grayWork.release()
@@ -254,16 +262,16 @@ object ImageMatcher {
                 }
 
                 val matchLoc = mmr.maxLoc
-                val targetCenterRelX = matchLoc.x + (targetMat.cols() / 2.0)
-                val targetCenterRelY = matchLoc.y + (targetMat.rows() / 2.0)
+                val targetCenterRelX = matchLoc.x + (template.width / 2.0)
+                val targetCenterRelY = matchLoc.y + (template.height / 2.0)
 
                 val screenX = (searchRect.x + targetCenterRelX).toFloat()
                 val screenY = (searchRect.y + targetCenterRelY).toFloat()
 
                 val screenLeft = (searchRect.x + matchLoc.x).toInt()
                 val screenTop = (searchRect.y + matchLoc.y).toInt()
-                val screenRight = screenLeft + targetMat.cols()
-                val screenBottom = screenTop + targetMat.rows()
+                val screenRight = screenLeft + template.width
+                val screenBottom = screenTop + template.height
 
                 val bounds = android.graphics.Rect(screenLeft, screenTop, screenRight, screenBottom)
                 matches.add(MatchResult(true, maxConfidence, screenX, screenY, bounds))
@@ -271,8 +279,8 @@ object ImageMatcher {
                 // Mask out this matched area in workMat so it isn't picked again
                 val x1 = matchLoc.x.toInt().coerceAtLeast(0)
                 val y1 = matchLoc.y.toInt().coerceAtLeast(0)
-                val x2 = (matchLoc.x + targetMat.cols()).toInt().coerceAtMost(workMat.cols())
-                val y2 = (matchLoc.y + targetMat.rows()).toInt().coerceAtMost(workMat.rows())
+                val x2 = (matchLoc.x + template.width).toInt().coerceAtMost(workMat.cols())
+                val y2 = (matchLoc.y + template.height).toInt().coerceAtMost(workMat.rows())
 
                 Imgproc.rectangle(
                     workMat,
@@ -286,13 +294,11 @@ object ImageMatcher {
         } catch (e: Exception) {
             Log.e(TAG, "Error in findAllMatches", e)
         } finally {
-            screenMat?.release()
-            targetMat?.release()
-            grayTarget?.release()
             workMat?.release()
             if (restrictRegion && searchAreaMat != screenMat) {
                 searchAreaMat?.release()
             }
+            screenMat?.release()
         }
 
         return matches

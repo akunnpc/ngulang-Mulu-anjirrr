@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -12,15 +13,20 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
+import android.view.Surface
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.data.AppDatabase
 import com.example.data.ProfileRepository
 import com.example.util.AppLogger
+import com.example.util.CalibrationPrefs
 import com.example.util.ImageMatcher
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +57,7 @@ class ScreenCaptureService : Service() {
     private var screenDpi = 320
 
     private var lastCachedBitmap: Bitmap? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     enum class ServiceState {
         STOPPED,
@@ -63,6 +70,24 @@ class ScreenCaptureService : Service() {
         super.onCreate()
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         createNotificationChannel()
+
+        // Register display listener to detect landscape/portrait orientation flips in real-time
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    checkAndUpdateDisplayMetrics()
+                }
+            }
+        }
+        displayManager?.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        checkAndUpdateDisplayMetrics()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -113,25 +138,96 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun initProjection(resultCode: Int, resultData: Intent) {
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private fun getRealScreenMetrics(): DisplayMetrics {
         val metrics = DisplayMetrics()
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            screenWidth = bounds.width()
-            screenHeight = bounds.height()
-            screenDpi = resources.configuration.densityDpi
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        if (defaultDisplay != null) {
+            @Suppress("DEPRECATION")
+            defaultDisplay.getRealMetrics(metrics)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.maximumWindowMetrics.bounds
+            metrics.widthPixels = bounds.width()
+            metrics.heightPixels = bounds.height()
+            metrics.densityDpi = resources.configuration.densityDpi
         } else {
             @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getRealMetrics(metrics)
-            screenWidth = metrics.widthPixels
-            screenHeight = metrics.heightPixels
-            screenDpi = metrics.densityDpi
+            wm.defaultDisplay.getRealMetrics(metrics)
         }
 
-        Log.d(TAG, "Screen Dimensions: ${screenWidth}x${screenHeight} @ $screenDpi DPI")
+        // Validate orientation with display rotation and user calibration mode
+        val mode = CalibrationPrefs.getOrientationMode(this)
+        val rotation = defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val isLandscape = when (mode) {
+            CalibrationPrefs.MODE_LANDSCAPE -> true
+            CalibrationPrefs.MODE_PORTRAIT -> false
+            else -> rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270 || (metrics.widthPixels > metrics.heightPixels)
+        }
 
+        if (isLandscape && metrics.widthPixels < metrics.heightPixels) {
+            val temp = metrics.widthPixels
+            metrics.widthPixels = metrics.heightPixels
+            metrics.heightPixels = temp
+        } else if (!isLandscape && metrics.widthPixels > metrics.heightPixels) {
+            val temp = metrics.widthPixels
+            metrics.widthPixels = metrics.heightPixels
+            metrics.heightPixels = temp
+        }
+
+        return metrics
+    }
+
+    @Synchronized
+    private fun checkAndUpdateDisplayMetrics() {
+        if (mediaProjection == null) return
+
+        val realMetrics = getRealScreenMetrics()
+        val currentW = realMetrics.widthPixels
+        val currentH = realMetrics.heightPixels
+        val currentDpi = realMetrics.densityDpi
+
+        if (currentW <= 0 || currentH <= 0) return
+
+        if (imageReader == null || screenWidth != currentW || screenHeight != currentH) {
+            val isLandscape = currentW > currentH
+            Log.d(TAG, "Layar berotasi / ukuran berubah: ${screenWidth}x${screenHeight} -> ${currentW}x${currentH} (Landscape: $isLandscape)")
+            AppLogger.log("Orientasi layar aktif: ${currentW}x${currentH} (${if (isLandscape) "Miring/Landscape" else "Tegak/Portrait"}). Menyiapkan VirtualDisplay...")
+
+            screenWidth = currentW
+            screenHeight = currentH
+            screenDpi = currentDpi
+
+            try {
+                // Hapus cache lama agar tidak tercampur dengan rasio orientasi sebelumnya
+                synchronized(this@ScreenCaptureService) {
+                    try { lastCachedBitmap?.recycle() } catch (e: Exception) {}
+                    lastCachedBitmap = null
+                }
+
+                imageReader?.close()
+                imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+
+                // CRITICAL: Always release old VirtualDisplay and recreate on MediaProjection to prevent coordinate distortion
+                try {
+                    virtualDisplay?.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Gagal me-release VirtualDisplay lama", e)
+                }
+                virtualDisplay = mediaProjection?.createVirtualDisplay(
+                    "AutoTapScreenCapture",
+                    screenWidth, screenHeight, screenDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader?.surface, null, null
+                )
+                Log.d(TAG, "VirtualDisplay berhasil dibuat ulang ke ${screenWidth}x${screenHeight} @ ${screenDpi}DPI")
+            } catch (e: Exception) {
+                Log.e(TAG, "Gagal memperbarui VirtualDisplay saat orientasi berubah", e)
+            }
+        }
+    }
+
+    private fun initProjection(resultCode: Int, resultData: Intent) {
         try {
             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, resultData)
             
@@ -144,17 +240,11 @@ class ScreenCaptureService : Service() {
                 }
             }, null)
 
-            // Setup image reader to capture full screen dimensions
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "AutoTapScreenCapture",
-                screenWidth, screenHeight, screenDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface, null, null
-            )
+            // Setup image reader and virtual display matching exact current screen orientation
+            checkAndUpdateDisplayMetrics()
 
             _state.value = ServiceState.IDLE
-            AppLogger.log("Screen capture initialized. Ready to Tap.")
+            AppLogger.log("Screen capture diinisialisasi (${screenWidth}x${screenHeight}). Siap memindai.")
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing MediaProjection", e)
             AppLogger.log("Error initializing Screen Capture: ${e.message}")
@@ -260,10 +350,15 @@ class ScreenCaptureService : Service() {
 
                 // If target is a manual coordinate point, execute directly without screenshot/image matching
                 if (target.targetType == "POINT") {
-                    val tapX = if (target.pointX > 0f) target.pointX else (if (screenWidth > 0) screenWidth / 2f else 540f)
-                    val tapY = if (target.pointY > 0f) target.pointY else (if (screenHeight > 0) screenHeight / 2f else 960f)
+                    val globalOffsetX = CalibrationPrefs.getGlobalOffsetX(this@ScreenCaptureService)
+                    val globalOffsetY = CalibrationPrefs.getGlobalOffsetY(this@ScreenCaptureService)
 
-                    AppLogger.log("Langkah ${currentStepIndex + 1}/${targets.size} (Titik Koordinat): '${target.name}' di (${tapX.toInt()}, ${tapY.toInt()})")
+                    val rawX = if (target.pointX > 0f) target.pointX else (if (screenWidth > 0) screenWidth / 2f else 540f)
+                    val rawY = if (target.pointY > 0f) target.pointY else (if (screenHeight > 0) screenHeight / 2f else 960f)
+                    val tapX = (rawX + target.offsetX + globalOffsetX).coerceIn(0f, screenWidth.toFloat())
+                    val tapY = (rawY + target.offsetY + globalOffsetY).coerceIn(0f, screenHeight.toFloat())
+
+                    AppLogger.log("Langkah ${currentStepIndex + 1}/${targets.size} (Titik Koordinat): '${target.name}' di (${tapX.toInt()}, ${tapY.toInt()})" + (if (target.offsetX != 0 || target.offsetY != 0 || globalOffsetX != 0 || globalOffsetY != 0) " [Offset: (${target.offsetX + globalOffsetX}, ${target.offsetY + globalOffsetY})]" else ""))
                     
                     val pointRect = android.graphics.Rect(
                         (tapX - 40).toInt().coerceAtLeast(0),
@@ -321,6 +416,9 @@ class ScreenCaptureService : Service() {
                     stepStartTime = System.currentTimeMillis()
                     continue
                 }
+
+                // Ensure virtual display and image reader match the current screen orientation (Landscape / Portrait)
+                checkAndUpdateDisplayMetrics()
 
                 // Acquire current frame
                 val screenshot = captureScreenshot()
@@ -404,34 +502,55 @@ class ScreenCaptureService : Service() {
                 if (matches.isNotEmpty()) {
                     AppLogger.log("Langkah ${currentStepIndex + 1} ditemukan ${matches.size} kemunculan '${target.name}' di layar. Memproses pembelian berurutan...")
 
+                    val realMetrics = getRealScreenMetrics()
+                    val realW = realMetrics.widthPixels.toFloat()
+                    val realH = realMetrics.heightPixels.toFloat()
+                    val scaleX = if (screenshot.width > 0) realW / screenshot.width.toFloat() else 1f
+                    val scaleY = if (screenshot.height > 0) realH / screenshot.height.toFloat() else 1f
+
+                    val globalOffsetX = CalibrationPrefs.getGlobalOffsetX(this@ScreenCaptureService)
+                    val globalOffsetY = CalibrationPrefs.getGlobalOffsetY(this@ScreenCaptureService)
+
                     for ((index, match) in matches.withIndex()) {
-                        AppLogger.log("   -> Memproses item #${index + 1} di (${match.screenX.toInt()}, ${match.screenY.toInt()}) dengan konfidensi ${String.format("%.2f", match.confidence)}")
+                        val baseTapX = match.screenX * scaleX
+                        val baseTapY = match.screenY * scaleY
+                        val tapX = (baseTapX + target.offsetX + globalOffsetX).coerceIn(0f, realW)
+                        val tapY = (baseTapY + target.offsetY + globalOffsetY).coerceIn(0f, realH)
+
+                        val scaledRect = android.graphics.Rect(
+                            (match.rect.left * scaleX + target.offsetX + globalOffsetX).toInt(),
+                            (match.rect.top * scaleY + target.offsetY + globalOffsetY).toInt(),
+                            (match.rect.right * scaleX + target.offsetX + globalOffsetX).toInt(),
+                            (match.rect.bottom * scaleY + target.offsetY + globalOffsetY).toInt()
+                        )
+
+                        AppLogger.log("   -> Memproses item #${index + 1} di (${tapX.toInt()}, ${tapY.toInt()}) dengan konfidensi ${String.format("%.2f", match.confidence)}" + (if (target.offsetX != 0 || target.offsetY != 0 || globalOffsetX != 0 || globalOffsetY != 0) " [Offset: (${target.offsetX + globalOffsetX}, ${target.offsetY + globalOffsetY})]" else ""))
 
                         when (target.actionType) {
                             "LONG_PRESS" -> {
-                                val pressSent = TapAccessibilityService.performLongPressSuspend(match.screenX, match.screenY, target.holdDurationMs)
+                                val pressSent = TapAccessibilityService.performLongPressSuspend(tapX, tapY, target.holdDurationMs)
                                 if (pressSent) {
                                     val newCount = target.tapCount + 1
                                     repository.updateTargetImage(target.copy(tapCount = newCount))
                                     AppLogger.log("Tekan tahan sentuh selama ${target.holdDurationMs}ms berhasil pada '${target.name}'! Aksi ke-$newCount")
                                     _totalTapCount.value = _totalTapCount.value + 1
-                                    _matchHighlights.tryEmit(MatchHighlightEvent(match.rect, match.screenX, match.screenY, "${target.name} (#${index + 1} Tahan)"))
+                                    _matchHighlights.tryEmit(MatchHighlightEvent(scaledRect, tapX, tapY, "${target.name} (#${index + 1} Tahan)"))
                                 } else {
                                     AppLogger.log("⚠️ Tekan tahan gagal pada '${target.name}'. Apakah Layanan Aksesibilitas aktif?")
                                 }
                             }
                             "WAIT_ONLY" -> {
                                 AppLogger.log("Langkah ${currentStepIndex + 1}: '${target.name}' terdeteksi! (Tunggu Saja).")
-                                _matchHighlights.tryEmit(MatchHighlightEvent(match.rect, match.screenX, match.screenY, "${target.name} (#${index + 1} Tunggu)"))
+                                _matchHighlights.tryEmit(MatchHighlightEvent(scaledRect, tapX, tapY, "${target.name} (#${index + 1} Tunggu)"))
                             }
                             else -> { // "TAP"
-                                val tapSent = TapAccessibilityService.performTapSuspend(match.screenX, match.screenY)
+                                val tapSent = TapAccessibilityService.performTapSuspend(tapX, tapY)
                                 if (tapSent) {
                                     val newCount = target.tapCount + 1
                                     repository.updateTargetImage(target.copy(tapCount = newCount))
                                     AppLogger.log("Ketukan berhasil pada '${target.name}' (#${index + 1})! Total ketukan: $newCount")
                                     _totalTapCount.value = _totalTapCount.value + 1
-                                    _matchHighlights.tryEmit(MatchHighlightEvent(match.rect, match.screenX, match.screenY, "${target.name} (#${index + 1})"))
+                                    _matchHighlights.tryEmit(MatchHighlightEvent(scaledRect, tapX, tapY, "${target.name} (#${index + 1})"))
                                 } else {
                                     AppLogger.log("⚠️ Ketukan gagal pada '${target.name}'. Apakah Layanan Aksesibilitas aktif?")
                                 }
@@ -535,13 +654,14 @@ class ScreenCaptureService : Service() {
             val buffer = planes[0].buffer
             val pixelStride = planes[0].pixelStride
             val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * img.width
+            val rowPadding = if (pixelStride > 0) (rowStride - pixelStride * img.width) / pixelStride else 0
 
             val bitmap = Bitmap.createBitmap(
-                img.width + rowPadding / pixelStride,
+                img.width + rowPadding,
                 img.height,
                 Bitmap.Config.ARGB_8888
             )
+            buffer.rewind()
             bitmap.copyPixelsFromBuffer(buffer)
 
             val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, img.width, img.height)
@@ -636,6 +756,11 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        displayListener?.let {
+            val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            displayManager?.unregisterDisplayListener(it)
+        }
+        displayListener = null
         stopProjection()
         super.onDestroy()
     }

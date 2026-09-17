@@ -125,6 +125,14 @@ fun TargetListItem(
                         fontSize = 11.sp,
                         color = TextMuted
                     )
+                    if (target.offsetX != 0 || target.offsetY != 0) {
+                        Text(
+                            "Offset: X ${if (target.offsetX > 0) "+${target.offsetX}" else "${target.offsetX}"}px, Y ${if (target.offsetY > 0) "+${target.offsetY}" else "${target.offsetY}"}px",
+                            fontSize = 11.sp,
+                            color = CyberCyan,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                     if (target.maxTaps > 0) {
                         Text(
                             "Tap Maks: ${target.tapCount}/${target.maxTaps}",
